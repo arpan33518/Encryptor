@@ -11,10 +11,6 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "blessed": "^0.1.81",
-    "bonjour-service": "^1.4.4",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^6.0.1",
-    "ssh2": "^1.17.0"
+  
   }
 }

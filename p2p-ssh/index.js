@@ -10,6 +10,7 @@ const ssh2 = require("ssh2");
 const { initUI } = require("./ui");
 const { Bonjour } = require("bonjour-service");
 
+
 async function checkAppFiles() {
   const homeDir = os.homedir();
 
@@ -73,10 +74,19 @@ async function checkAppFiles() {
     console.log(`Public key created:  ${pubKeyFile}`);
   }
 
-  // Add yourself as a trusted peer sow you can test locally!
+  const ownName = process.env.CHAT_NAME || os.userInfo().username || "Peer";
+
+  // Add yourself as a trusted peer so you can test locally!
   await db.run("INSERT OR IGNORE INTO peers (public_key, name) VALUES (?, ?)", [
-    existingPubKey,
-    "Arpan",
+    existingPubKey.trim(),
+    ownName,
+  ]);
+
+  // Add target peer public key
+  const targetPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFBBu0SYsnSxt4GwvkMn3ilvHrgphOSqFd9XublOBEK";
+  await db.run("INSERT OR IGNORE INTO peers (public_key, name) VALUES (?, ?)", [
+    targetPubKey.trim(),
+    "Peer",
   ]);
 
   // Declare appendMessage variable so it can be referenced in callbacks
@@ -84,13 +94,18 @@ async function checkAppFiles() {
 
   // Start the UI and handle outbound user typing
   const uiElements = initUI(async (text) => {
-    const messageObject = {
+    const localMessage = {
       Message_Id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       Sender: "You",
-      Receiver: "Arpan",
+      Receiver: "Peer",
       Content: text,
       Timestamp: Date.now(),
       Status: "sent",
+    };
+
+    const networkPayload = {
+      ...localMessage,
+      Sender: ownName, // Send actual identity to remote peer
     };
 
     try {
@@ -98,37 +113,45 @@ async function checkAppFiles() {
       await db.run(
         "INSERT INTO messages (Message_Id, Sender, Receiver, Content, Timestamp, Status) VALUES (?, ?, ?, ?, ?, ?)",
         [
-          messageObject.Message_Id,
-          messageObject.Sender,
-          messageObject.Receiver,
-          messageObject.Content,
-          messageObject.Timestamp,
-          messageObject.Status,
+          localMessage.Message_Id,
+          localMessage.Sender,
+          localMessage.Receiver,
+          localMessage.Content,
+          localMessage.Timestamp,
+          localMessage.Status,
         ],
       );
 
       // 2. Display in local UI box
       if (appendMessage) {
-        appendMessage("You", text, messageObject.Timestamp);
+        appendMessage("You", text, localMessage.Timestamp);
       }
 
-      // 3. Transmit outbound message over SSH connection to known peers
+      // 3. Transmit outbound message over SSH connection to known peers (excluding self)
       const trustedPeers = await db.all(
-        "SELECT * FROM peers WHERE public_key != ?",
-        [existingPubKey],
+        "SELECT * FROM peers WHERE public_key NOT LIKE ?",
+        [`${existingPubKey.trim()}%`],
       );
 
       let sentToPeer = false;
       if (trustedPeers && trustedPeers.length > 0) {
         for (const peer of trustedPeers) {
-          const host = peer.ip || "127.0.0.1";
+          if (!peer.ip) {
+            if (appendMessage) {
+              appendMessage("System", `Cannot send to ${peer.name || "Peer"}: IP address not discovered yet.`);
+            }
+            continue;
+          }
+          const host = peer.ip;
           const port = peer.port || 2222;
-          await sendMessage(host, port, existingPrivKey, messageObject);
+          await sendMessage(host, port, existingPrivKey, networkPayload);
           sentToPeer = true;
         }
       }
-      if (!sentToPeer) {
-        await sendMessage("127.0.0.1", 2222, existingPrivKey, messageObject);
+      if (!sentToPeer && trustedPeers.length === 0) {
+        if (appendMessage) {
+          appendMessage("System", "No remote peers registered in database.");
+        }
       }
     } catch (err) {
       if (appendMessage) {
@@ -174,18 +197,24 @@ async function startSSHEngine(privateKey, db, appendMessage) {
 
         try {
           // 2. Reconstruct incoming OpenSSH public key string
-          const incomingKey = `${ctx.key.algo} ${ctx.key.data.toString("base64")}`;
+          const incomingKey = `${ctx.key.algo} ${ctx.key.data.toString("base64")}`.trim();
 
-          // 3. Ask SQLite if this key exists in our 'peers' table
+          // 3. Ask SQLite if this key (or prefix) exists in our 'peers' table
           const peer = await db.get(
-            "SELECT * FROM peers WHERE public_key = ?",
-            [incomingKey],
+            "SELECT * FROM peers WHERE public_key LIKE ?",
+            [`${incomingKey}%`],
           );
 
           // 4. Make the decision
           if (peer) {
+            if (appendMessage) {
+              appendMessage("System", `Authenticated connection from peer "${peer.name || "Unknown"}"`);
+            }
             return ctx.accept(); // Let them in!
           } else {
+            if (appendMessage) {
+              appendMessage("System", `Rejected connection from unknown key: ${incomingKey.substring(0, 30)}...`);
+            }
             return ctx.reject(); // Kick them out!
           }
         } catch (err) {
@@ -347,14 +376,19 @@ function startDiscovery(db, ownPubKey, appendMessage) {
     try {
       if (!service.txt || !service.txt.pubkey) return;
 
-      const discoveredPubKey = service.txt.pubkey.trim();
+      const cleanDiscoveredKey = service.txt.pubkey.trim();
+      const cleanOwnKey = ownPubKey.trim();
 
       // Ignore self broadcast
-      if (discoveredPubKey === ownPubKey.trim()) return;
+      if (cleanDiscoveredKey === cleanOwnKey) return;
 
       let peerIp = null;
       if (service.addresses && service.addresses.length > 0) {
-        peerIp = service.addresses.find((addr) => !addr.includes(":"));
+        const ipv4s = service.addresses.filter((addr) => !addr.includes(":"));
+        const realIps = ipv4s.filter(
+          (addr) => !addr.startsWith("169.254.") && !addr.startsWith("192.168.56.")
+        );
+        peerIp = realIps.length > 0 ? realIps[0] : ipv4s[0];
       }
       if (!peerIp && service.referer && service.referer.address) {
         peerIp = service.referer.address;
@@ -364,24 +398,30 @@ function startDiscovery(db, ownPubKey, appendMessage) {
 
       const peerPort = service.port || parseInt(service.txt.port, 10) || 2222;
 
-      const peer = await db.get(
-        "SELECT * FROM peers WHERE public_key = ?",
-        [discoveredPubKey],
+      let peer = await db.get(
+        "SELECT * FROM peers WHERE public_key LIKE ?",
+        [`${cleanDiscoveredKey}%`],
       );
 
-      if (peer) {
+      if (!peer) {
+        await db.run(
+          "INSERT INTO peers (public_key, name, ip, port) VALUES (?, ?, ?, ?)",
+          [cleanDiscoveredKey, "Discovered Peer", peerIp, peerPort],
+        );
+        peer = { name: "Discovered Peer" };
+      } else {
         // Automatically update peer's current local IP address and port in DB
         await db.run(
-          "UPDATE peers SET ip = ?, port = ? WHERE public_key = ?",
-          [peerIp, peerPort, discoveredPubKey],
+          "UPDATE peers SET ip = ?, port = ? WHERE public_key LIKE ?",
+          [peerIp, peerPort, `${cleanDiscoveredKey}%`],
         );
+      }
 
-        if (appendMessage) {
-          appendMessage(
-            "System",
-            `Discovered trusted peer "${peer.name || "Unknown"}" at ${peerIp}:${peerPort}`,
-          );
-        }
+      if (appendMessage) {
+        appendMessage(
+          "System",
+          `Discovered peer "${peer.name || "Unknown"}" at ${peerIp}:${peerPort}`,
+        );
       }
     } catch (err) {
       if (appendMessage) {
