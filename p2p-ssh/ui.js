@@ -4,15 +4,31 @@ function initUI(onSendMessage) {
   // 1. Initialize the master canvas
   const screen = blessed.screen({
     smartCSR: true,
-    title: 'P2P SSH Chat'
+    title: 'P2P SSH Chat Engine'
   });
 
-  // 2. The Message History Box (Top portion)
+  // 2. Header / Status Bar (Top)
+  const header = blessed.box({
+    parent: screen,
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: 3,
+    border: { type: 'line' },
+    style: {
+      border: { fg: 'cyan' },
+      header: { fg: 'white', bg: 'blue' }
+    },
+    tags: true,
+    content: '{bold}{cyan-fg} P2P SSH Chat {/cyan-fg}{/bold} | {yellow-fg}Status: Initializing...{/yellow-fg} | {gray-fg}[PgUp/PgDn: Scroll | Ctrl+C: Exit]{/gray-fg}'
+  });
+
+  // 3. The Message History Box (Middle portion)
   const messageList = blessed.box({
     parent: screen,
     width: '100%',
-    height: '80%',     // Takes up the top 80% of the terminal
-    top: 0,            // Starts at the very top row
+    height: '75%',     // Takes up middle 75%
+    top: 3,            // Below status header
     left: 0,
     border: { type: 'line' },
     tags: true,        // Enables formatting tags like {bold}, {green-fg}, etc.
@@ -25,7 +41,7 @@ function initUI(onSendMessage) {
     label: ' Chat History '
   });
 
-  // 3. The Input Box (Bottom portion)
+  // 4. The Input Box (Bottom portion)
   const input = blessed.textbox({
     parent: screen,
     width: '100%',
@@ -34,7 +50,7 @@ function initUI(onSendMessage) {
     left: 0,
     border: { type: 'line' },
     inputOnFocus: true, // Allows typing when focused
-    label: ' Type a message (Press Enter to send) '
+    label: ' Type a message or command like /help (Press Enter to send) '
   });
 
   // Handle pressing Enter to send a message
@@ -69,7 +85,30 @@ function initUI(onSendMessage) {
     screen.render();
   }
 
-  // 4. Let the user exit the app safely
+  // Clear message box helper
+  function clearHistory() {
+    messageList.setContent('');
+    screen.render();
+  }
+
+  // Set status helper
+  function setStatus(statusText) {
+    header.setContent(`{bold}{cyan-fg} P2P SSH Chat {/cyan-fg}{/bold} | ${statusText} | {gray-fg}[PgUp/PgDn: Scroll | Ctrl+C: Exit]{/gray-fg}`);
+    screen.render();
+  }
+
+  // Scroll keys
+  screen.key(['pageup'], () => {
+    messageList.scroll(-5);
+    screen.render();
+  });
+
+  screen.key(['pagedown'], () => {
+    messageList.scroll(5);
+    screen.render();
+  });
+
+  // Exit safely
   screen.key(['escape', 'C-c'], function (ch, key) {
     return process.exit(0);
   });
@@ -82,10 +121,14 @@ function initUI(onSendMessage) {
 
   return {
     screen,
+    header,
     messageList,
     input,
-    appendMessage
+    appendMessage,
+    clearHistory,
+    setStatus
   };
 }
 
 module.exports = { initUI };
+

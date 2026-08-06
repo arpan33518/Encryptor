@@ -84,6 +84,64 @@ async function checkAppFiles() {
 
   // Start the UI and handle outbound user typing
   const uiElements = initUI(async (text) => {
+    // 0. Handle CLI Slash Commands
+    if (text.startsWith("/")) {
+      const parts = text.trim().split(" ");
+      const cmd = parts[0].toLowerCase();
+
+      if (cmd === "/help") {
+        if (appendMessage) {
+          appendMessage("System", "Available CLI Commands:");
+          appendMessage("System", "  /help                    - Show command help");
+          appendMessage("System", "  /peers                   - List all trusted & discovered peers");
+          appendMessage("System", "  /addpeer <name> <pubkey> - Manually add a trusted peer");
+          appendMessage("System", "  /clear                   - Clear screen history");
+          appendMessage("System", "  /quit                    - Exit application");
+        }
+        return;
+      }
+
+      if (cmd === "/clear") {
+        uiElements.clearHistory();
+        return;
+      }
+
+      if (cmd === "/quit") {
+        process.exit(0);
+      }
+
+      if (cmd === "/peers") {
+        const peers = await db.all("SELECT * FROM peers");
+        if (!peers || peers.length === 0) {
+          if (appendMessage) appendMessage("System", "No peers currently stored in database.");
+        } else {
+          if (appendMessage) {
+            appendMessage("System", "--- Known Peers ---");
+            for (const p of peers) {
+              const shortKey = p.public_key ? p.public_key.substring(0, 25) + "..." : "N/A";
+              appendMessage("System", `Name: ${p.name || 'Unknown'} | IP: ${p.ip || '127.0.0.1'}:${p.port || 2222} | Key: ${shortKey}`);
+            }
+          }
+        }
+        return;
+      }
+
+      if (cmd === "/addpeer") {
+        const name = parts[1];
+        const pubkey = parts.slice(2).join(" ");
+        if (!name || !pubkey) {
+          if (appendMessage) appendMessage("System", "Usage: /addpeer <name> <ssh-ed25519 AAA...>");
+          return;
+        }
+        await db.run("INSERT OR REPLACE INTO peers (public_key, name) VALUES (?, ?)", [pubkey, name]);
+        if (appendMessage) appendMessage("System", `Successfully added peer "${name}".`);
+        return;
+      }
+
+      if (appendMessage) appendMessage("System", `Unknown command "${cmd}". Type /help for available commands.`);
+      return;
+    }
+
     const messageObject = {
       Message_Id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       Sender: "You",
@@ -94,7 +152,7 @@ async function checkAppFiles() {
     };
 
     try {
-      // 1. Insert into local SQLite database
+      // 1. Insert into local SQLite database with initial status 'pending'
       await db.run(
         "INSERT INTO messages (Message_Id, Sender, Receiver, Content, Timestamp, Status) VALUES (?, ?, ?, ?, ?, ?)",
         [
@@ -123,22 +181,35 @@ async function checkAppFiles() {
         for (const peer of trustedPeers) {
           const host = peer.ip || "127.0.0.1";
           const port = peer.port || 2222;
-          await sendMessage(host, port, existingPrivKey, messageObject);
-          sentToPeer = true;
+          try {
+            await sendMessage(host, port, existingPrivKey, messageObject);
+            sentToPeer = true;
+          } catch (err) {
+            // If individual peer fails, log and keep in outbox
+          }
         }
       }
-      if (!sentToPeer) {
-        await sendMessage("127.0.0.1", 2222, existingPrivKey, messageObject);
+
+      if (sentToPeer) {
+        // Update database status to 'sent' once successfully pushed
+        await db.run("UPDATE messages SET Status = 'sent' WHERE Message_Id = ?", [
+          messageObject.Message_Id,
+        ]);
+      } else {
+        if (appendMessage) {
+          appendMessage("System", "Peer unavailable. Message saved in Outbox for automatic retry.");
+        }
       }
     } catch (err) {
       if (appendMessage) {
-        appendMessage("System", `Failed to send: ${err.message}`);
+        appendMessage("System", `Failed to store message: ${err.message}`);
       }
     }
   });
 
   // Extract the appendMessage function so we can use it
   appendMessage = uiElements.appendMessage;
+  uiElements.setStatus("{green-fg}Status: Online (Listening on port 2222){/green-fg}");
 
   // Load past chat history from SQLite DB
   try {
@@ -150,13 +221,16 @@ async function checkAppFiles() {
     appendMessage("System", `Failed to load chat history: ${err.message}`);
   }
 
-  appendMessage("System", "P2P SSH Chat Engine online.");
+  appendMessage("System", "P2P SSH Chat Engine online. Type /help to view available commands.");
+
+  // Start the Outbox Worker to attempt re-delivering pending messages in the background
+  startOutboxWorker(db, existingPrivKey, existingPubKey, appendMessage);
 
   // Pass appendMessage to the SSH engine so incoming network payloads update the UI
   await startSSHEngine(existingPrivKey, db, appendMessage);
 
   // Start mDNS peer broadcasting and listening
-  startDiscovery(db, existingPubKey, appendMessage);
+  startDiscovery(db, existingPubKey, appendMessage, uiElements.setStatus);
 }
 
 checkAppFiles();
@@ -312,7 +386,7 @@ function sendMessage(host, port, privateKey, messageObject) {
   });
 }
 
-function startDiscovery(db, ownPubKey, appendMessage) {
+function startDiscovery(db, ownPubKey, appendMessage, setStatus) {
   const bonjour = new Bonjour();
   const PORT = 2222;
 
@@ -393,3 +467,61 @@ function startDiscovery(db, ownPubKey, appendMessage) {
   browser.on("up", handleDiscoveredService);
   browser.on("update", handleDiscoveredService);
 }
+
+function startOutboxWorker(db, privateKey, existingPubKey, appendMessage) {
+  // Background interval: poll SQLite every 15 seconds for pending messages
+  setInterval(async () => {
+    try {
+      const pendingMessages = await db.all(
+        "SELECT * FROM messages WHERE Status = 'pending' ORDER BY Timestamp ASC"
+      );
+
+      if (!pendingMessages || pendingMessages.length === 0) return;
+
+      const trustedPeers = await db.all(
+        "SELECT * FROM peers WHERE public_key != ?",
+        [existingPubKey]
+      );
+
+      if (!trustedPeers || trustedPeers.length === 0) return;
+
+      for (const msg of pendingMessages) {
+        let delivered = false;
+
+        const payload = {
+          Message_Id: msg.Message_Id,
+          Sender: msg.Sender,
+          Receiver: msg.Receiver,
+          Content: msg.Content,
+          Timestamp: msg.Timestamp,
+          Status: "sent",
+        };
+
+        for (const peer of trustedPeers) {
+          const host = peer.ip || "127.0.0.1";
+          const port = peer.port || 2222;
+
+          try {
+            await sendMessage(host, port, privateKey, payload);
+            delivered = true;
+          } catch (err) {
+            // Peer still offline or unreachable, ignore error & try next peer/cycle
+          }
+        }
+
+        if (delivered) {
+          await db.run("UPDATE messages SET Status = 'sent' WHERE Message_Id = ?", [
+            msg.Message_Id,
+          ]);
+
+          if (appendMessage) {
+            appendMessage("System", `[Outbox Retry] Message "${msg.Content}" delivered successfully!`);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Outbox retry error:", err.message);
+    }
+  }, 15000);
+}
+
