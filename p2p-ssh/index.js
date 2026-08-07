@@ -120,6 +120,41 @@ async function checkAppFiles() {
             "System",
             "  /search <message>                    - search messages from all peers",
           );
+          appendMessage(
+            "System",
+            "  /outbox                    - see all pending messages",
+          );
+        }
+        return;
+      }
+
+      if (cmd === "/outbox") {
+        try {
+          const results = await db.all(
+            "SELECT * FROM messages WHERE status = 'pending'  ORDER BY Timestamp ASC",
+          );
+
+          if (!results || results.length === 0) {
+            if (appendMessage) {
+              appendMessage("System", `No pending message found`);
+              return;
+            }
+          }
+
+          if (appendMessage) {
+            appendMessage("System", `-- Pending Messages--> ${results.length}`);
+
+            for (const msg of results) {
+              appendMessage(
+                "System",
+                `To ${msg.Receiver} : ${msg.Content} : ${msg.Timestamp} `,
+              );
+            }
+          }
+        } catch (err) {
+          if (appendMessage) {
+            appendMessage("System", `Outbox error: ${err.message}`);
+          }
         }
         return;
       }
