@@ -9,6 +9,7 @@ const { initDb } = require("./db");
 const ssh2 = require("ssh2");
 const { initUI } = require("./ui");
 const { Bonjour } = require("bonjour-service");
+const { startLibp2pEngine } = require("./p2p");
 
 async function checkAppFiles() {
   const homeDir = os.homedir();
@@ -148,7 +149,7 @@ async function checkAppFiles() {
       Receiver: "Arpan",
       Content: text,
       Timestamp: Date.now(),
-      Status: "sent",
+      Status: "pending",
     };
 
     try {
@@ -231,6 +232,24 @@ async function checkAppFiles() {
 
   // Start mDNS peer broadcasting and listening
   startDiscovery(db, existingPubKey, appendMessage, uiElements.setStatus);
+
+  // Start libp2p Internet Routing & DHT Discovery Engine (Phase 6B)
+  await startLibp2pEngine(existingPubKey, appendMessage, async (peerId, ip, port) => {
+    try {
+      if (!ip || !port) return;
+      // Auto-update peer addresses found via global P2P network
+      const existing = await db.all("SELECT * FROM peers");
+      if (existing && existing.length > 0) {
+        for (const p of existing) {
+          if (p.public_key !== existingPubKey) {
+            await db.run("UPDATE peers SET ip = ?, port = ? WHERE public_key = ?", [ip, port, p.public_key]);
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore DB callback errors
+    }
+  });
 }
 
 checkAppFiles();

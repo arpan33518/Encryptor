@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -11,8 +12,14 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@libp2p/bootstrap": "^12.0.29",
+    "@libp2p/kad-dht": "^16.4.2",
+    "@libp2p/noise": "^1.0.1",
+    "@libp2p/tcp": "^11.0.26",
+    "@libp2p/yamux": "^8.0.1",
     "blessed": "^0.1.81",
     "bonjour-service": "^1.4.4",
+    "libp2p": "^3.3.8",
     "sqlite": "^5.1.1",
     "sqlite3": "^6.0.1",
     "ssh2": "^1.17.0"
