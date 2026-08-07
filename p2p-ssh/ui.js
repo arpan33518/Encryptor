@@ -65,6 +65,8 @@ function initUI(onSendMessage) {
     screen.render();
   });
 
+  
+
   // Helper method to add a message line to history box
   function appendMessage(sender, content, timestamp) {
     const timeStr = timestamp 
