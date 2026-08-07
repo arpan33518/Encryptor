@@ -116,12 +116,61 @@ async function checkAppFiles() {
             "System",
             "  /removepeer <name>                    - removes peer from database",
           );
+          appendMessage(
+            "System",
+            "  /search <message>                    - search messages from all peers",
+          );
         }
         return;
       }
 
       if (cmd === "/clear") {
         uiElements.clearHistory();
+        return;
+      }
+
+      if (cmd == "/search") {
+        try {
+          const message = parts.slice(1).join(" ");
+          if (!message) {
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `provide a word to search {syntax : /search <word>}`,
+              );
+              return;
+            }
+          }
+
+          const results = await db.all(
+            "SELECT * FROM messages WHERE Content LIKE ? ORDER BY Timestamp ASC",
+            [`%${message}%`],
+          );
+
+          if (!results || results.length === 0) {
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `No messages found matching "${message}".`,
+              );
+              return;
+            }
+          } else {
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `--- Search Results for "${message}" (${results.length} found) ---`,
+              );
+              for (const msg of results) {
+                appendMessage(msg.Sender, msg.Content, msg.Timestamp);
+              }
+            }
+          }
+        } catch (err) {
+          if (appendMessage) {
+            appendMessage("System", `Search error: ${err.message}`);
+          }
+        }
         return;
       }
 
@@ -132,7 +181,7 @@ async function checkAppFiles() {
             if (appendMessage) {
               appendMessage(
                 "System",
-                `provide a name to remove {syntax : /removepper <name>}`,
+                `provide a name to remove {syntax : /removepeer <name>}`,
               );
               return;
             }
@@ -305,22 +354,31 @@ async function checkAppFiles() {
   startDiscovery(db, existingPubKey, appendMessage, uiElements.setStatus);
 
   // Start libp2p Internet Routing & DHT Discovery Engine (Phase 6B)
-  await startLibp2pEngine(existingPubKey, appendMessage, async (peerId, ip, port) => {
-    try {
-      if (!ip || !port) return;
-      // Auto-update peer addresses found via global P2P network
-      const existing = await db.all("SELECT * FROM peers");
-      if (existing && existing.length > 0) {
-        for (const p of existing) {
-          if (p.public_key !== existingPubKey) {
-            await db.run("UPDATE peers SET ip = ?, port = ? WHERE public_key = ?", [ip, port, p.public_key]);
+  if (typeof startLibp2pEngine !== "undefined") {
+    await startLibp2pEngine(
+      existingPubKey,
+      appendMessage,
+      async (peerId, ip, port) => {
+        try {
+          if (!ip || !port) return;
+          // Auto-update peer addresses found via global P2P network
+          const existing = await db.all("SELECT * FROM peers");
+          if (existing && existing.length > 0) {
+            for (const p of existing) {
+              if (p.public_key !== existingPubKey) {
+                await db.run(
+                  "UPDATE peers SET ip = ?, port = ? WHERE public_key = ?",
+                  [ip, port, p.public_key],
+                );
+              }
+            }
           }
+        } catch (e) {
+          // Ignore DB callback errors
         }
-      }
-    } catch (e) {
-      // Ignore DB callback errors
-    }
-  });
+      },
+    );
+  }
 }
 
 checkAppFiles();
