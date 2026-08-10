@@ -124,6 +124,50 @@ async function checkAppFiles() {
             "System",
             "  /outbox                    - see all pending messages",
           );
+          appendMessage(
+            "System",
+            "  /export <filename>                  - export all messages",
+          );
+        }
+        return;
+      }
+
+      if (cmd === "/export") {
+        const rawname = parts[1];
+
+        if (!rawname) {
+          if (appendMessage) {
+            appendMessage("System", `provide a file name to export the chats `);
+            return;
+          }
+        }
+
+        const filename = `${rawname}.json`;
+
+        const dbPath = path.join(os.homedir(), ".myapp", filename);
+
+        try {
+          const results = await db.all(
+            "SELECT * FROM messages ORDER BY Timestamp ASC",
+          );
+
+          if (!results || results.length === 0) {
+            if (appendMessage) {
+              appendMessage("System", `No message found`);
+              return;
+            }
+          }
+
+          const jsonContent = JSON.stringify(results, null, 2);
+
+          await fs.writeFile(dbPath, jsonContent, "utf8");
+          if (appendMessage) {
+            appendMessage("System", `Chat successfully exported to ${dbPath}`);
+          }
+        } catch (err) {
+          if (appendMessage) {
+            appendMessage("System", `Export error: ${err.message}`);
+          }
         }
         return;
       }
@@ -535,7 +579,7 @@ const { Client } = require("ssh2");
 
 //For Becoming the Client
 function sendMessage(host, port, privateKey, messageObject) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) =>   {
     const conn = new Client();
 
     conn.on("ready", () => {
