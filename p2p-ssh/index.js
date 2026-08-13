@@ -136,10 +136,6 @@ async function checkAppFiles() {
             "System",
             "  /mykey                   - Display your public key",
           );
-          appendMessage(
-            "System",
-            "  /setip <peer_name> <ip> [port]     - Manually set a peer's IP address & port",
-          );
         }
         return;
       }
@@ -325,66 +321,21 @@ async function checkAppFiles() {
 
       if (cmd === "/addpeer") {
         const name = parts[1];
-        if (!name || parts.length < 3) {
+        const pubkey = parts.slice(2).join(" ");
+        if (!name || !pubkey) {
           if (appendMessage)
             appendMessage(
               "System",
-              "Usage: /addpeer <name> <ssh-ed25519 AAA...> [ip] [port]",
-            );
-          return;
-        }
-
-        let ip = null;
-        let port = 2222;
-        let keyParts = parts.slice(2);
-
-        // Check if optional trailing arguments are IP and Port
-        if (
-          keyParts.length >= 3 &&
-          !isNaN(keyParts[keyParts.length - 1]) &&
-          keyParts[keyParts.length - 2].includes(".")
-        ) {
-          port = parseInt(keyParts.pop(), 10);
-          ip = keyParts.pop();
-        } else if (
-          keyParts.length >= 2 &&
-          keyParts[keyParts.length - 1].includes(".")
-        ) {
-          ip = keyParts.pop();
-        }
-
-        const pubkey = keyParts.join(" ");
-
-        await db.run(
-          "INSERT OR REPLACE INTO peers (public_key, name, ip, port) VALUES (?, ?, ?, ?)",
-          [pubkey, name, ip, port],
-        );
-        if (appendMessage)
-          appendMessage(
-            "System",
-            `Successfully added peer "${name}"${ip ? ` (${ip}:${port})` : ""}.`,
-          );
-        return;
-      }
-
-      if (cmd === "/setip") {
-        const name = parts[1];
-        const ip = parts[2];
-        const port = parts[3] ? parseInt(parts[3], 10) : 2222;
-        if (!name || !ip) {
-          if (appendMessage)
-            appendMessage(
-              "System",
-              "Usage: /setip <peer_name> <ip_address> [port]",
+              "Usage: /addpeer <name> <ssh-ed25519 AAA...>",
             );
           return;
         }
         await db.run(
-          "UPDATE peers SET ip = ?, port = ? WHERE LOWER(name) = LOWER(?)",
-          [ip, port, name],
+          "INSERT OR REPLACE INTO peers (public_key, name) VALUES (?, ?)",
+          [pubkey, name],
         );
         if (appendMessage)
-          appendMessage("System", `Updated ${name}'s IP to ${ip}:${port}`);
+          appendMessage("System", `Successfully added peer "${name}".`);
         return;
       }
 
@@ -411,16 +362,7 @@ async function checkAppFiles() {
             return;
           }
 
-          if (!peer.ip) {
-            if (appendMessage)
-              appendMessage(
-                "System",
-                `IP address for "${peer.name}" is unknown. Use /setip ${peer.name} <ip> [port]`,
-              );
-            return;
-          }
-
-          const host = peer.ip;
+          const host = peer.ip || "127.0.0.1";
           const port = peer.port || 2222;
 
           const pingPayload = { type: "ping", Timestamp: Date.now() };
@@ -501,27 +443,13 @@ async function checkAppFiles() {
       let sentToPeer = false;
       if (trustedPeers && trustedPeers.length > 0) {
         for (const peer of trustedPeers) {
-          if (!peer.ip) {
-            if (appendMessage) {
-              appendMessage(
-                "System",
-                `IP address for "${peer.name}" is unknown. Set it using: /setip ${peer.name} <ip>`,
-              );
-            }
-            continue;
-          }
-          const host = peer.ip;
+          const host = peer.ip || "127.0.0.1";
           const port = peer.port || 2222;
           try {
             await sendMessage(host, port, existingPrivKey, messageObject);
             sentToPeer = true;
           } catch (err) {
-            if (appendMessage) {
-              appendMessage(
-                "System",
-                `Failed to send to ${peer.name} (${host}:${port}): ${err.message}`,
-              );
-            }
+            // If individual peer fails, log and keep in outbox
           }
         }
       }
@@ -786,93 +714,165 @@ function sendMessage(host, port, privateKey, messageObject) {
   });
 }
 
-function startDiscovery(db, ownPubKey, appendMessage, setStatus) {
-  const bonjour = new Bonjour();
-  const PORT = 2222;
+async function updatePeerAddress(db, pubKey, ip, port, appendMessage) {
+  try {
+    if (!pubKey || !ip || ip === "127.0.0.1" || ip.startsWith("127.")) return;
 
-  const nodeName = `p2p-node-${crypto
-    .createHash("md5")
-    .update(ownPubKey)
-    .digest("hex")
-    .substring(0, 8)}`;
+    const cleanKey = String(pubKey).trim();
+    const peers = await db.all("SELECT * FROM peers");
 
-  // 1. Continuously broadcast presence on local network
-  bonjour.publish({
-    name: nodeName,
-    type: "p2p-chat",
-    port: PORT,
-    txt: {
-      pubkey: ownPubKey.trim(),
-      port: String(PORT),
-    },
+    if (peers && peers.length > 0) {
+      for (const p of peers) {
+        if (p.public_key && String(p.public_key).trim() === cleanKey) {
+          if (p.ip !== ip || p.port !== port) {
+            await db.run(
+              "UPDATE peers SET ip = ?, port = ? WHERE public_key = ?",
+              [ip, port, p.public_key],
+            );
+
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `[Auto-Discovered] Peer "${p.name || "Unknown"}" active at ${ip}:${port}`,
+              );
+            }
+          }
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore DB callback errors
+  }
+}
+
+function startDiscovery(db, ownPubKey, appendMessage, setStatus, port = 2222) {
+  const cleanOwnKey = String(ownPubKey).trim();
+
+  // 1. UDP Subnet Broadcast Beacon (Fast & Reliable across LAN)
+  const dgram = require("dgram");
+  const udpSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  const BEACON_PORT = 22222;
+
+  udpSocket.on("error", () => {});
+
+  udpSocket.on("message", async (msg, rinfo) => {
+    try {
+      const payload = JSON.parse(msg.toString());
+      if (payload && payload.type === "p2p-beacon" && payload.pubkey) {
+        const remotePubKey = String(payload.pubkey).trim();
+        const remotePort = payload.port || 2222;
+        const remoteIp = rinfo.address;
+
+        if (remotePubKey === cleanOwnKey) return;
+        if (remoteIp === "127.0.0.1" || remoteIp.startsWith("127.")) return;
+
+        await updatePeerAddress(
+          db,
+          remotePubKey,
+          remoteIp,
+          remotePort,
+          appendMessage,
+        );
+      }
+    } catch (e) {}
   });
+
+  udpSocket.bind(BEACON_PORT, () => {
+    try {
+      udpSocket.setBroadcast(true);
+    } catch (e) {}
+  });
+
+  setInterval(() => {
+    try {
+      const beaconMsg = Buffer.from(
+        JSON.stringify({
+          type: "p2p-beacon",
+          pubkey: cleanOwnKey,
+          port: port,
+        }),
+      );
+      udpSocket.send(
+        beaconMsg,
+        0,
+        beaconMsg.length,
+        BEACON_PORT,
+        "255.255.255.255",
+      );
+    } catch (e) {}
+  }, 4000);
+
+  // 2. mDNS Discovery (Bonjour Service)
+  try {
+    const bonjour = new Bonjour();
+    const nodeName = `p2p-node-${crypto
+      .createHash("md5")
+      .update(cleanOwnKey)
+      .digest("hex")
+      .substring(0, 8)}`;
+
+    bonjour.publish({
+      name: nodeName,
+      type: "p2p-chat",
+      port: port,
+      txt: {
+        pubkey: cleanOwnKey,
+        port: String(port),
+      },
+    });
+
+    const browser = bonjour.find({ type: "p2p-chat" });
+
+    const handleDiscoveredService = async (service) => {
+      try {
+        if (!service.txt || !service.txt.pubkey) return;
+
+        let rawPubKey = service.txt.pubkey;
+        if (Buffer.isBuffer(rawPubKey)) {
+          rawPubKey = rawPubKey.toString("utf8");
+        }
+        const discoveredPubKey = String(rawPubKey).trim();
+
+        if (discoveredPubKey === cleanOwnKey) return;
+
+        let peerIp = null;
+        if (service.addresses && service.addresses.length > 0) {
+          peerIp = service.addresses.find(
+            (addr) =>
+              !addr.includes(":") &&
+              !addr.startsWith("127.") &&
+              !addr.startsWith("169.254"),
+          );
+        }
+        if (!peerIp && service.referer && service.referer.address) {
+          peerIp = service.referer.address;
+        }
+
+        if (!peerIp || peerIp.startsWith("127.")) return;
+
+        const peerPort = service.port || parseInt(service.txt.port, 10) || 2222;
+
+        await updatePeerAddress(
+          db,
+          discoveredPubKey,
+          peerIp,
+          peerPort,
+          appendMessage,
+        );
+      } catch (err) {}
+    };
+
+    browser.on("up", handleDiscoveredService);
+    browser.on("update", handleDiscoveredService);
+  } catch (err) {}
 
   if (appendMessage) {
     appendMessage(
       "System",
-      "mDNS Discovery active: broadcasting presence on local network.",
+      "Auto-Discovery active: broadcasting presence on local network (UDP & mDNS).",
     );
   }
-
-  // 2. Listen for broadcasts from other peers
-  const browser = bonjour.find({ type: "p2p-chat" });
-
-  const handleDiscoveredService = async (service) => {
-    try {
-      if (!service.txt || !service.txt.pubkey) return;
-
-      const discoveredPubKey = service.txt.pubkey.trim();
-
-      // Ignore self broadcast
-      if (discoveredPubKey === ownPubKey.trim()) return;
-
-      let peerIp = null;
-      if (service.addresses && service.addresses.length > 0) {
-        peerIp = service.addresses.find((addr) => !addr.includes(":"));
-      }
-      if (!peerIp && service.referer && service.referer.address) {
-        peerIp = service.referer.address;
-      }
-
-      if (!peerIp) return;
-
-      const peerPort = service.port || parseInt(service.txt.port, 10) || 2222;
-
-      const peer = await db.get("SELECT * FROM peers WHERE public_key = ?", [
-        discoveredPubKey,
-      ]);
-
-      if (peer) {
-        // Automatically update peer's current local IP address and port in DB
-        await db.run("UPDATE peers SET ip = ?, port = ? WHERE public_key = ?", [
-          peerIp,
-          peerPort,
-          discoveredPubKey,
-        ]);
-
-        if (appendMessage) {
-          appendMessage(
-            "System",
-            `Discovered trusted peer "${peer.name || "Unknown"}" at ${peerIp}:${peerPort}`,
-          );
-        }
-      } else {
-        if (appendMessage) {
-          appendMessage(
-            "System",
-            `Discovered un-trusted peer broadcast at ${peerIp}:${peerPort}!`,
-          );
-        }
-      }
-    } catch (err) {
-      if (appendMessage) {
-        appendMessage("System", `mDNS discovery error: ${err.message}`);
-      }
-    }
-  };
-
-  browser.on("up", handleDiscoveredService);
-  browser.on("update", handleDiscoveredService);
 }
 
 function startOutboxWorker(db, privateKey, existingPubKey, appendMessage) {
@@ -905,8 +905,7 @@ function startOutboxWorker(db, privateKey, existingPubKey, appendMessage) {
         };
 
         for (const peer of trustedPeers) {
-          if (!peer.ip) continue;
-          const host = peer.ip;
+          const host = peer.ip || "127.0.0.1";
           const port = peer.port || 2222;
 
           try {
