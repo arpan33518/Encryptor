@@ -664,9 +664,6 @@ function sendMessage(host, port, privateKey, messageObject) {
     const conn = new Client();
 
     conn.on("ready", () => {
-      console.log("Client connected to peer! Opening channel...");
-
-      // Request an 'exec' session to stream data
       conn.exec("send_msg", (err, stream) => {
         if (err) {
           conn.end();
@@ -678,24 +675,18 @@ function sendMessage(host, port, privateKey, messageObject) {
           responsedata += chunk.toString();
         });
 
-        // Convert our JavaScript object into a raw JSON string
         const payload = JSON.stringify(messageObject);
-
-        // Send the payload through the SSH stream
         stream.write(payload);
-        stream.end(); // Close stream to notify server we're done sending
+        stream.end();
 
         stream.on("close", () => {
-          console.log("Message stream closed by server.");
-          conn.end(); // Close the connection
+          conn.end();
 
           let responseObj = null;
           if (responsedata) {
             try {
               responseObj = JSON.parse(responsedata);
-            } catch (e) {
-              console.log("Error in receiving response object");
-            }
+            } catch (e) {}
           }
           resolve(responseObj);
         });
@@ -704,11 +695,10 @@ function sendMessage(host, port, privateKey, messageObject) {
 
     conn.on("error", (err) => reject(err));
 
-    // Connect using your SSH private key
     conn.connect({
       host: host,
       port: port,
-      username: "peer", // SSH requires a username field, can be any string
+      username: "peer",
       privateKey: privateKey,
     });
   });
