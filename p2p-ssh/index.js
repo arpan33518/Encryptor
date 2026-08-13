@@ -10,11 +10,17 @@ const ssh2 = require("ssh2");
 const { initUI } = require("./ui");
 const { Bonjour } = require("bonjour-service");
 
-async function checkAppFiles() {
-  const homeDir = os.homedir();
+// Configurable settings via environment variables or command-line arguments
+// Usage: node index.js [dataDir] [port] [name]  e.g. node index.js .myapp1 2222 PC
+const customFolder = process.env.APP_DIR || process.argv[2] || ".myapp";
+const appDir = path.isAbsolute(customFolder)
+  ? customFolder
+  : path.join(os.homedir(), customFolder);
+const PORT = parseInt(process.env.PORT || process.argv[3] || "2222", 10);
+let myName = process.env.PEER_NAME || process.argv[4] || (os.hostname() || "Peer");
 
+async function checkAppFiles() {
   // Construct the paths
-  const appDir = path.join(homeDir, ".myapp");
   const keyFile = path.join(appDir, "id_ed25519");
   const pubKeyFile = path.join(appDir, "id_ed25519.pub");
   const dbPath = path.join(appDir, "chat.db");
@@ -145,6 +151,22 @@ async function checkAppFiles() {
           appendMessage("System", "Your Public Key:");
           appendMessage("System", existingPubKey.trim());
         }
+        return;
+      }
+
+      if (cmd === "/setname" || cmd === "/name") {
+        const newName = parts.slice(1).join(" ");
+        if (!newName) {
+          if (appendMessage)
+            appendMessage(
+              "System",
+              `Your current name is: "${myName}". Use /setname <new_name> to change.`,
+            );
+          return;
+        }
+        myName = newName;
+        if (appendMessage)
+          appendMessage("System", `Your display name is now set to: "${myName}".`);
         return;
       }
 
@@ -408,8 +430,8 @@ async function checkAppFiles() {
 
     const messageObject = {
       Message_Id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      Sender: "You",
-      Receiver: "Arpan",
+      Sender: myName,
+      Receiver: "Peer",
       Content: text,
       Timestamp: Date.now(),
       Status: "sent",
@@ -607,10 +629,21 @@ async function startSSHEngine(privateKey, db, appendMessage, port = 2222) {
                   return;
                 }
 
-                // Resolve sender name dynamically from authenticated SSH key
-                const senderDisplayName =
-                  client.authenticatedPeerName ||
-                  (dataObject.Sender !== "You" ? dataObject.Sender : "Peer");
+                // Resolve sender name dynamically from authenticated SSH key or message payload
+                let senderDisplayName = "Peer";
+                if (
+                  client.authenticatedPeerName &&
+                  client.authenticatedPeerName !== "Arpan" &&
+                  client.authenticatedPeerName !== "Me"
+                ) {
+                  senderDisplayName = client.authenticatedPeerName;
+                } else if (
+                  dataObject.Sender &&
+                  dataObject.Sender !== "You" &&
+                  dataObject.Sender !== "Me"
+                ) {
+                  senderDisplayName = dataObject.Sender;
+                }
 
                 // Inserting to database
                 const query =
