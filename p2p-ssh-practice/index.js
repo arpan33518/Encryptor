@@ -23,265 +23,68 @@ let existingPrivKey;
 let existingPubKey;
 
 // ============================================================================
-// 🛠️ NETWORKING TASK STUBS (YOUR LEARNING WORKSHOP)
+// 🛠️ NETWORKING WORKSHOP - YOUR HANDS-ON TASKS
 // ============================================================================
 
 /**
  * ✍️ TASK 1: Extract Base64 Key Hash from OpenSSH Key String
- * OpenSSH keys look like: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
- * Write a function that returns strictly the base64 part ("AAAAC3Nza...").
+ * @param {string} pubKeyStr - e.g. "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
+ * @returns {string} - strictly the base64 portion ("AAAAC3NzaC1lZDI1NTE5AAAAI...")
  */
 function getRawKeyData(pubKeyStr) {
-  // TODO: Implement getRawKeyData(pubKeyStr)
-  if (!pubKeyStr) return "";
-  const parts = String(pubKeyStr).trim().split(/\s+/);
-  if (parts.length >= 2 && parts[0].startsWith("ssh-")) {
-    return parts[1];
-  }
-  return parts[0];
+  // TODO: Write your code here
+  return "";
 }
 
 /**
  * ✍️ TASK 2: Calculate Active IPv4 Subnet Broadcast Addresses
- * Calculate all subnet broadcast IPs (e.g. 192.168.1.255) for all non-internal IPv4 interfaces.
+ * @returns {Array<string>} - Array of target broadcast IPs, e.g. ["255.255.255.255", "192.168.1.255"]
  */
 function getBroadcastAddresses() {
-  // TODO: Implement getBroadcastAddresses()
-  const broadcasts = new Set(["255.255.255.255"]);
-  try {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-      for (const net of interfaces[name]) {
-        if (net.family === "IPv4" && !net.internal) {
-          const ipParts = net.address.split(".").map(Number);
-          const maskParts = net.netmask.split(".").map(Number);
-          const broadcastParts = ipParts.map(
-            (ip, i) => ip | (~maskParts[i] & 255),
-          );
-          broadcasts.add(broadcastParts.join("."));
-        }
-      }
-    }
-  } catch (e) {}
-  return Array.from(broadcasts);
+  // TODO: Write your code here to calculate subnet broadcasts using os.networkInterfaces()
+  return ["255.255.255.255"];
 }
 
 /**
  * ✍️ TASK 3: Update Peer IP & Port in SQLite DB
- * Given a discovered public key, IP, and Port, match against 'peers' table in DB
- * using getRawKeyData() and update IP and Port.
+ * Search 'peers' table in database using getRawKeyData().
+ * If matched, update IP and Port columns in SQLite database and notify UI.
  */
 async function updatePeerAddress(database, pubKey, ip, port, appendMessage) {
-  // TODO: Practice writing updatePeerAddress logic
-  try {
-    if (!pubKey || !ip || ip === "127.0.0.1" || ip.startsWith("127.")) return;
-    const rawDiscoveredKey = getRawKeyData(pubKey);
-    if (!rawDiscoveredKey) return;
-
-    const peers = await database.all("SELECT * FROM peers");
-    let matchedPeer = null;
-
-    if (peers && peers.length > 0) {
-      for (const p of peers) {
-        if (p.public_key && getRawKeyData(p.public_key) === rawDiscoveredKey) {
-          matchedPeer = p;
-          break;
-        }
-      }
-    }
-
-    if (matchedPeer) {
-      if (matchedPeer.ip !== ip || matchedPeer.port !== port) {
-        await database.run(
-          "UPDATE peers SET ip = ?, port = ? WHERE public_key = ?",
-          [ip, port, matchedPeer.public_key],
-        );
-        if (appendMessage) {
-          appendMessage(
-            "System",
-            `[Auto-Discovered] Peer "${matchedPeer.name || "Unknown"}" active at ${ip}:${port}`,
-          );
-        }
-      }
-    }
-  } catch (e) {}
+  // TODO: Write your code here
 }
 
 /**
  * ✍️ TASK 4: Outbound SSH Client Transmission
- * Connect to host:port using ssh2 Client and execute "send_msg" channel payload.
+ * Connect to host:port using ssh2.Client with a readyTimeout: 3000.
+ * Open an 'exec' session for "send_msg", write messageObject JSON payload, and resolve response.
  */
 function sendMessage(host, port, privateKey, messageObject) {
   return new Promise((resolve, reject) => {
-    const { Client } = require("ssh2");
-    const conn = new Client();
-
-    conn.on("ready", () => {
-      conn.exec("send_msg", (err, stream) => {
-        if (err) {
-          conn.end();
-          return reject(err);
-        }
-        let responsedata = "";
-        stream.on("data", (chunk) => {
-          responsedata += chunk.toString();
-        });
-
-        const payload = JSON.stringify(messageObject);
-        stream.write(payload);
-        stream.end();
-
-        stream.on("close", () => {
-          conn.end();
-          let responseObj = null;
-          if (responsedata) {
-            try { responseObj = JSON.parse(responsedata); } catch (e) {}
-          }
-          resolve(responseObj);
-        });
-      });
-    });
-
-    conn.on("error", (err) => reject(err));
-
-    conn.connect({
-      host: host,
-      port: port,
-      username: "peer",
-      privateKey: privateKey,
-      readyTimeout: 3000,
-    });
+    // TODO: Write your ssh2.Client outbound connection code here
+    reject(new Error("sendMessage not implemented yet"));
   });
 }
 
 /**
  * ✍️ TASK 5: Start Inbound SSH Server Engine
- * Listen for incoming SSH connections, verify public key against local SQLite DB,
- * and receive incoming message payload.
+ * Create an ssh2.Server listening on `port`.
+ * On 'authentication', check incoming key (ctx.key) against 'peers' table in database using getRawKeyData().
+ * On 'ready' -> 'session' -> 'exec', receive JSON payload, resolve peer name strictly from database, insert into messages table, and call appendMessage().
  */
 async function startSSHEngine(privateKey, database, appendMessage, port = 2222) {
-  const server = new ssh2.Server({ hostKeys: [privateKey] }, (client) => {
-    client.on("authentication", async (ctx) => {
-      if (ctx.method !== "publickey") return ctx.reject(["publickey"]);
-      try {
-        const incomingKey = `${ctx.key.algo} ${ctx.key.data.toString("base64")}`;
-        const rawIncomingKey = getRawKeyData(incomingKey);
-        client.incomingRawKey = rawIncomingKey;
-
-        const peers = await database.all("SELECT * FROM peers");
-        let matchedPeer = null;
-
-        if (peers && peers.length > 0) {
-          for (const p of peers) {
-            if (p.public_key && getRawKeyData(p.public_key) === rawIncomingKey) {
-              matchedPeer = p;
-              break;
-            }
-          }
-        }
-
-        if (matchedPeer) {
-          client.authenticatedPeerName = matchedPeer.name || "Peer";
-          return ctx.accept();
-        } else {
-          return ctx.reject();
-        }
-      } catch (err) {
-        return ctx.reject();
-      }
-    });
-
-    client.on("ready", () => {
-      client.on("session", (accept) => {
-        const session = accept();
-        session.once("exec", (accept) => {
-          const stream = accept();
-          let rawData = "";
-          stream.on("data", (chunk) => { rawData += chunk.toString(); });
-          stream.on("end", async () => {
-            try {
-              const dataObject = JSON.parse(rawData);
-              let senderDisplayName = "Unknown Peer";
-              if (client.incomingRawKey) {
-                const currentPeers = await database.all("SELECT * FROM peers");
-                if (currentPeers && currentPeers.length > 0) {
-                  for (const p of currentPeers) {
-                    if (p.public_key && getRawKeyData(p.public_key) === client.incomingRawKey) {
-                      if (p.name) { senderDisplayName = p.name; break; }
-                    }
-                  }
-                }
-              }
-              if (senderDisplayName === "Unknown Peer" && client.authenticatedPeerName) {
-                senderDisplayName = client.authenticatedPeerName;
-              }
-
-              await database.run(
-                "INSERT INTO messages (Message_Id, Sender, Receiver, Content, Timestamp, Status) VALUES (?, ?, ?, ?, ?, ?)",
-                [dataObject.Message_Id, senderDisplayName, "You", dataObject.Content, dataObject.Timestamp, dataObject.Status || "received"]
-              );
-
-              if (appendMessage) {
-                appendMessage(senderDisplayName, dataObject.Content, dataObject.Timestamp);
-              }
-              stream.exit(0);
-            } catch (err) {} finally { stream.end(); }
-          });
-        });
-      });
-    });
-  });
-
-  server.listen(port, "0.0.0.0");
+  // TODO: Write your ssh2.Server inbound listener code here
 }
 
 /**
- * ✍️ TASK 6: Dual UDP & mDNS Peer Auto-Discovery
+ * ✍️ TASK 6: Dual Peer Auto-Discovery (UDP Subnet Broadcast + mDNS)
+ * 1. Create a UDP socket (dgram) listening on port 22222 with reuseAddr: true.
+ * 2. Broadcast beacon JSON payloads every 4s to all target broadcast addresses from getBroadcastAddresses().
+ * 3. Handle incoming UDP messages and call updatePeerAddress().
+ * 4. Also publish and browse mDNS service using Bonjour.
  */
 function startDiscovery(database, ownPubKey, appendMessage, setStatus, port = 2222) {
-  const cleanOwnKey = String(ownPubKey).trim();
-  const ownRawKey = getRawKeyData(cleanOwnKey);
-
-  const dgram = require("dgram");
-  const udpSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
-  const BEACON_PORT = 22222;
-
-  udpSocket.on("error", () => {});
-  udpSocket.on("message", async (msg, rinfo) => {
-    try {
-      const payload = JSON.parse(msg.toString());
-      if (payload && payload.type === "p2p-beacon" && payload.pubkey) {
-        const remotePubKey = String(payload.pubkey).trim();
-        const remotePort = payload.port || 2222;
-        const remoteIp = rinfo.address;
-
-        if (getRawKeyData(remotePubKey) === ownRawKey) return;
-        if (remoteIp === "127.0.0.1" || remoteIp.startsWith("127.")) return;
-
-        await updatePeerAddress(database, remotePubKey, remoteIp, remotePort, appendMessage);
-      }
-    } catch (e) {}
-  });
-
-  udpSocket.bind(BEACON_PORT, "0.0.0.0", () => {
-    try { udpSocket.setBroadcast(true); } catch (e) {}
-  });
-
-  setInterval(() => {
-    try {
-      const beaconMsg = Buffer.from(
-        JSON.stringify({ type: "p2p-beacon", pubkey: cleanOwnKey, port: port })
-      );
-      const targets = getBroadcastAddresses();
-      for (const targetIp of targets) {
-        udpSocket.send(beaconMsg, 0, beaconMsg.length, BEACON_PORT, targetIp, () => {});
-      }
-    } catch (e) {}
-  }, 4000);
-
-  if (appendMessage) {
-    appendMessage("System", "Auto-Discovery active: broadcasting presence on local network.");
-  }
+  // TODO: Write your UDP dgram beacon & Bonjour discovery code here
 }
 
 // ============================================================================
@@ -472,9 +275,9 @@ async function checkAppFiles() {
   appendMessage = uiElements.appendMessage;
   uiElements.setStatus(`{green-fg}Status: Online (Listening on port ${PORT}){/green-fg}`);
 
-  appendMessage("System", "P2P SSH Chat Practice Base online. Type /help for commands.");
+  appendMessage("System", "P2P SSH Chat Practice Workshop. Complete your networking functions to get online!");
 
-  // Start networking services
+  // Call networking functions
   await startSSHEngine(existingPrivKey, db, appendMessage, PORT);
   startDiscovery(db, existingPubKey, appendMessage, uiElements.setStatus, PORT);
 }
