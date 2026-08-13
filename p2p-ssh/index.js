@@ -136,6 +136,10 @@ async function checkAppFiles() {
             "System",
             "  /mykey                   - Display your public key",
           );
+          appendMessage(
+            "System",
+            "  /setip <peer_name> <ip> [port]     - Manually set a peer's IP address & port",
+          );
         }
         return;
       }
@@ -321,21 +325,66 @@ async function checkAppFiles() {
 
       if (cmd === "/addpeer") {
         const name = parts[1];
-        const pubkey = parts.slice(2).join(" ");
-        if (!name || !pubkey) {
+        if (!name || parts.length < 3) {
           if (appendMessage)
             appendMessage(
               "System",
-              "Usage: /addpeer <name> <ssh-ed25519 AAA...>",
+              "Usage: /addpeer <name> <ssh-ed25519 AAA...> [ip] [port]",
+            );
+          return;
+        }
+
+        let ip = null;
+        let port = 2222;
+        let keyParts = parts.slice(2);
+
+        // Check if optional trailing arguments are IP and Port
+        if (
+          keyParts.length >= 3 &&
+          !isNaN(keyParts[keyParts.length - 1]) &&
+          keyParts[keyParts.length - 2].includes(".")
+        ) {
+          port = parseInt(keyParts.pop(), 10);
+          ip = keyParts.pop();
+        } else if (
+          keyParts.length >= 2 &&
+          keyParts[keyParts.length - 1].includes(".")
+        ) {
+          ip = keyParts.pop();
+        }
+
+        const pubkey = keyParts.join(" ");
+
+        await db.run(
+          "INSERT OR REPLACE INTO peers (public_key, name, ip, port) VALUES (?, ?, ?, ?)",
+          [pubkey, name, ip, port],
+        );
+        if (appendMessage)
+          appendMessage(
+            "System",
+            `Successfully added peer "${name}"${ip ? ` (${ip}:${port})` : ""}.`,
+          );
+        return;
+      }
+
+      if (cmd === "/setip") {
+        const name = parts[1];
+        const ip = parts[2];
+        const port = parts[3] ? parseInt(parts[3], 10) : 2222;
+        if (!name || !ip) {
+          if (appendMessage)
+            appendMessage(
+              "System",
+              "Usage: /setip <peer_name> <ip_address> [port]",
             );
           return;
         }
         await db.run(
-          "INSERT OR REPLACE INTO peers (public_key, name) VALUES (?, ?)",
-          [pubkey, name],
+          "UPDATE peers SET ip = ?, port = ? WHERE LOWER(name) = LOWER(?)",
+          [ip, port, name],
         );
         if (appendMessage)
-          appendMessage("System", `Successfully added peer "${name}".`);
+          appendMessage("System", `Updated ${name}'s IP to ${ip}:${port}`);
         return;
       }
 
@@ -362,7 +411,16 @@ async function checkAppFiles() {
             return;
           }
 
-          const host = peer.ip || "127.0.0.1";
+          if (!peer.ip) {
+            if (appendMessage)
+              appendMessage(
+                "System",
+                `IP address for "${peer.name}" is unknown. Use /setip ${peer.name} <ip> [port]`,
+              );
+            return;
+          }
+
+          const host = peer.ip;
           const port = peer.port || 2222;
 
           const pingPayload = { type: "ping", Timestamp: Date.now() };
@@ -443,13 +501,27 @@ async function checkAppFiles() {
       let sentToPeer = false;
       if (trustedPeers && trustedPeers.length > 0) {
         for (const peer of trustedPeers) {
-          const host = peer.ip || "127.0.0.1";
+          if (!peer.ip) {
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `IP address for "${peer.name}" is unknown. Set it using: /setip ${peer.name} <ip>`,
+              );
+            }
+            continue;
+          }
+          const host = peer.ip;
           const port = peer.port || 2222;
           try {
             await sendMessage(host, port, existingPrivKey, messageObject);
             sentToPeer = true;
           } catch (err) {
-            // If individual peer fails, log and keep in outbox
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `Failed to send to ${peer.name} (${host}:${port}): ${err.message}`,
+              );
+            }
           }
         }
       }
@@ -784,6 +856,13 @@ function startDiscovery(db, ownPubKey, appendMessage, setStatus) {
             `Discovered trusted peer "${peer.name || "Unknown"}" at ${peerIp}:${peerPort}`,
           );
         }
+      } else {
+        if (appendMessage) {
+          appendMessage(
+            "System",
+            `Discovered un-trusted peer broadcast at ${peerIp}:${peerPort}!`,
+          );
+        }
       }
     } catch (err) {
       if (appendMessage) {
@@ -826,7 +905,8 @@ function startOutboxWorker(db, privateKey, existingPubKey, appendMessage) {
         };
 
         for (const peer of trustedPeers) {
-          const host = peer.ip || "127.0.0.1";
+          if (!peer.ip) continue;
+          const host = peer.ip;
           const port = peer.port || 2222;
 
           try {
