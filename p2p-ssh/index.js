@@ -579,6 +579,7 @@ async function startSSHEngine(privateKey, db, appendMessage, port = 2222) {
           // 2. Reconstruct incoming OpenSSH public key string
           const incomingKey = `${ctx.key.algo} ${ctx.key.data.toString("base64")}`;
           const rawIncomingKey = getRawKeyData(incomingKey);
+          client.incomingRawKey = rawIncomingKey;
 
           // 3. Match against peers table using raw key data
           const peers = await db.all("SELECT * FROM peers");
@@ -634,33 +635,27 @@ async function startSSHEngine(privateKey, db, appendMessage, port = 2222) {
                   return;
                 }
 
-                // Priority for incoming message sender display name:
-                // 1. If key matches a named peer in local DB (not localhost), use peer's DB name
-                // 2. If message payload has valid sender name (not You/Me/localhost), use payload name
-                // 3. Fall back to authenticated name or Peer
-                let senderDisplayName = "";
+                // Strictly resolve sender name from local SQLite peers table by authenticated SSH public key
+                let senderDisplayName = "Unknown Peer";
+                if (client.incomingRawKey) {
+                  const currentPeers = await db.all("SELECT * FROM peers");
+                  if (currentPeers && currentPeers.length > 0) {
+                    for (const p of currentPeers) {
+                      if (
+                        p.public_key &&
+                        getRawKeyData(p.public_key) === client.incomingRawKey
+                      ) {
+                        if (p.name) {
+                          senderDisplayName = p.name;
+                          break;
+                        }
+                      }
+                    }
+                  }
+                }
 
-                if (
-                  client.authenticatedPeerName &&
-                  !["localhost", "127.0.0.1"].includes(
-                    client.authenticatedPeerName.toLowerCase(),
-                  )
-                ) {
+                if (senderDisplayName === "Unknown Peer" && client.authenticatedPeerName) {
                   senderDisplayName = client.authenticatedPeerName;
-                }
-
-                if (
-                  !senderDisplayName &&
-                  dataObject.Sender &&
-                  !["you", "me", "localhost", "127.0.0.1"].includes(
-                    dataObject.Sender.toLowerCase(),
-                  )
-                ) {
-                  senderDisplayName = dataObject.Sender;
-                }
-
-                if (!senderDisplayName) {
-                  senderDisplayName = client.authenticatedPeerName || "Peer";
                 }
 
                 // Inserting to database
