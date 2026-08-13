@@ -17,7 +17,12 @@ const appDir = path.isAbsolute(customFolder)
   ? customFolder
   : path.join(os.homedir(), customFolder);
 const PORT = parseInt(process.env.PORT || process.argv[3] || "2222", 10);
-let myName = process.env.PEER_NAME || process.argv[4] || (os.hostname() || "Peer");
+
+let rawDefaultName = process.env.PEER_NAME || process.argv[4] || "";
+if (!rawDefaultName || rawDefaultName.toLowerCase() === "localhost") {
+  rawDefaultName = path.basename(appDir).replace(".", "") || "Node";
+}
+let myName = rawDefaultName;
 
 async function checkAppFiles() {
   // Construct the paths
@@ -79,10 +84,10 @@ async function checkAppFiles() {
     console.log(`Public key created:  ${pubKeyFile}`);
   }
 
-  // Add yourself as a trusted peer sow you can test locally!
-  await db.run("INSERT OR IGNORE INTO peers (public_key, name) VALUES (?, ?)", [
+  // Store identity key in DB
+  await db.run("INSERT OR REPLACE INTO peers (public_key, name) VALUES (?, ?)", [
     existingPubKey,
-    "Arpan",
+    myName,
   ]);
 
   // Declare appendMessage variable so it can be referenced in callbacks
@@ -629,20 +634,33 @@ async function startSSHEngine(privateKey, db, appendMessage, port = 2222) {
                   return;
                 }
 
-                // Resolve sender name dynamically from authenticated SSH key or message payload
-                let senderDisplayName = "Peer";
+                // Priority for incoming message sender display name:
+                // 1. If key matches a named peer in local DB (not localhost), use peer's DB name
+                // 2. If message payload has valid sender name (not You/Me/localhost), use payload name
+                // 3. Fall back to authenticated name or Peer
+                let senderDisplayName = "";
+
                 if (
                   client.authenticatedPeerName &&
-                  client.authenticatedPeerName !== "Arpan" &&
-                  client.authenticatedPeerName !== "Me"
+                  !["localhost", "127.0.0.1"].includes(
+                    client.authenticatedPeerName.toLowerCase(),
+                  )
                 ) {
                   senderDisplayName = client.authenticatedPeerName;
-                } else if (
+                }
+
+                if (
+                  !senderDisplayName &&
                   dataObject.Sender &&
-                  dataObject.Sender !== "You" &&
-                  dataObject.Sender !== "Me"
+                  !["you", "me", "localhost", "127.0.0.1"].includes(
+                    dataObject.Sender.toLowerCase(),
+                  )
                 ) {
                   senderDisplayName = dataObject.Sender;
+                }
+
+                if (!senderDisplayName) {
+                  senderDisplayName = client.authenticatedPeerName || "Peer";
                 }
 
                 // Inserting to database
