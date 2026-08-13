@@ -469,16 +469,20 @@ async function checkAppFiles() {
 
       let sentToPeer = false;
       if (trustedPeers && trustedPeers.length > 0) {
-        for (const peer of trustedPeers) {
-          const host = peer.ip || "127.0.0.1";
+        const sendPromises = trustedPeers.map(async (peer) => {
+          if (!peer.ip || peer.ip === "127.0.0.1") return false;
+          const host = peer.ip;
           const port = peer.port || 2222;
           try {
             await sendMessage(host, port, existingPrivKey, messageObject);
-            sentToPeer = true;
+            return true;
           } catch (err) {
-            // If individual peer fails, log and keep in outbox
+            return false;
           }
-        }
+        });
+
+        const results = await Promise.all(sendPromises);
+        sentToPeer = results.some((success) => success === true);
       }
 
       if (sentToPeer) {
@@ -760,6 +764,7 @@ function sendMessage(host, port, privateKey, messageObject) {
       port: port,
       username: "peer",
       privateKey: privateKey,
+      readyTimeout: 3000,
     });
   });
 }
