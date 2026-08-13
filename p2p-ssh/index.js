@@ -714,30 +714,83 @@ function sendMessage(host, port, privateKey, messageObject) {
   });
 }
 
+function getRawKeyData(pubKeyStr) {
+  if (!pubKeyStr) return "";
+  const parts = String(pubKeyStr).trim().split(/\s+/);
+  if (parts.length >= 2 && parts[0].startsWith("ssh-")) {
+    return parts[1];
+  }
+  return parts[0];
+}
+
+function getBroadcastAddresses() {
+  const broadcasts = new Set(["255.255.255.255"]);
+  try {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const net of interfaces[name]) {
+        if (net.family === "IPv4" && !net.internal) {
+          const ipParts = net.address.split(".").map(Number);
+          const maskParts = net.netmask.split(".").map(Number);
+          const broadcastParts = ipParts.map(
+            (ip, i) => ip | (~maskParts[i] & 255),
+          );
+          broadcasts.add(broadcastParts.join("."));
+        }
+      }
+    }
+  } catch (e) {}
+  return Array.from(broadcasts);
+}
+
+const reportedDiscoveredKeys = new Set();
+
 async function updatePeerAddress(db, pubKey, ip, port, appendMessage) {
   try {
     if (!pubKey || !ip || ip === "127.0.0.1" || ip.startsWith("127.")) return;
 
-    const cleanKey = String(pubKey).trim();
+    const rawDiscoveredKey = getRawKeyData(pubKey);
+    if (!rawDiscoveredKey) return;
+
     const peers = await db.all("SELECT * FROM peers");
+    let matchedPeer = null;
 
     if (peers && peers.length > 0) {
       for (const p of peers) {
-        if (p.public_key && String(p.public_key).trim() === cleanKey) {
-          if (p.ip !== ip || p.port !== port) {
-            await db.run(
-              "UPDATE peers SET ip = ?, port = ? WHERE public_key = ?",
-              [ip, port, p.public_key],
-            );
-
-            if (appendMessage) {
-              appendMessage(
-                "System",
-                `[Auto-Discovered] Peer "${p.name || "Unknown"}" active at ${ip}:${port}`,
-              );
-            }
-          }
+        if (p.public_key && getRawKeyData(p.public_key) === rawDiscoveredKey) {
+          matchedPeer = p;
           break;
+        }
+      }
+    }
+
+    if (matchedPeer) {
+      if (matchedPeer.ip !== ip || matchedPeer.port !== port) {
+        await db.run(
+          "UPDATE peers SET ip = ?, port = ? WHERE public_key = ?",
+          [ip, port, matchedPeer.public_key],
+        );
+
+        if (appendMessage) {
+          appendMessage(
+            "System",
+            `[Auto-Discovered] Peer "${matchedPeer.name || "Unknown"}" active at ${ip}:${port}`,
+          );
+        }
+      }
+    } else {
+      const noticeKey = `${rawDiscoveredKey.substring(0, 16)}@${ip}:${port}`;
+      if (!reportedDiscoveredKeys.has(noticeKey)) {
+        reportedDiscoveredKeys.add(noticeKey);
+        if (appendMessage) {
+          const shortKey =
+            pubKey.trim().length > 30
+              ? pubKey.trim().substring(0, 30) + "..."
+              : pubKey.trim();
+          appendMessage(
+            "System",
+            `[Discovered Device] Active node found at ${ip}:${port} (Key: ${shortKey}). Use /addpeer <name> ${pubKey.trim()} to trust.`,
+          );
         }
       }
     }
@@ -748,6 +801,7 @@ async function updatePeerAddress(db, pubKey, ip, port, appendMessage) {
 
 function startDiscovery(db, ownPubKey, appendMessage, setStatus, port = 2222) {
   const cleanOwnKey = String(ownPubKey).trim();
+  const ownRawKey = getRawKeyData(cleanOwnKey);
 
   // 1. UDP Subnet Broadcast Beacon (Fast & Reliable across LAN)
   const dgram = require("dgram");
@@ -764,7 +818,7 @@ function startDiscovery(db, ownPubKey, appendMessage, setStatus, port = 2222) {
         const remotePort = payload.port || 2222;
         const remoteIp = rinfo.address;
 
-        if (remotePubKey === cleanOwnKey) return;
+        if (getRawKeyData(remotePubKey) === ownRawKey) return;
         if (remoteIp === "127.0.0.1" || remoteIp.startsWith("127.")) return;
 
         await updatePeerAddress(
@@ -778,7 +832,7 @@ function startDiscovery(db, ownPubKey, appendMessage, setStatus, port = 2222) {
     } catch (e) {}
   });
 
-  udpSocket.bind(BEACON_PORT, () => {
+  udpSocket.bind(BEACON_PORT, "0.0.0.0", () => {
     try {
       udpSocket.setBroadcast(true);
     } catch (e) {}
@@ -793,13 +847,17 @@ function startDiscovery(db, ownPubKey, appendMessage, setStatus, port = 2222) {
           port: port,
         }),
       );
-      udpSocket.send(
-        beaconMsg,
-        0,
-        beaconMsg.length,
-        BEACON_PORT,
-        "255.255.255.255",
-      );
+      const targets = getBroadcastAddresses();
+      for (const targetIp of targets) {
+        udpSocket.send(
+          beaconMsg,
+          0,
+          beaconMsg.length,
+          BEACON_PORT,
+          targetIp,
+          () => {},
+        );
+      }
     } catch (e) {}
   }, 4000);
 
@@ -834,7 +892,7 @@ function startDiscovery(db, ownPubKey, appendMessage, setStatus, port = 2222) {
         }
         const discoveredPubKey = String(rawPubKey).trim();
 
-        if (discoveredPubKey === cleanOwnKey) return;
+        if (getRawKeyData(discoveredPubKey) === ownRawKey) return;
 
         let peerIp = null;
         if (service.addresses && service.addresses.length > 0) {
