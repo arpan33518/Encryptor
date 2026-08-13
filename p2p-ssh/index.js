@@ -128,6 +128,22 @@ async function checkAppFiles() {
             "System",
             "  /export <filename>                  - export all messages",
           );
+          appendMessage(
+            "System",
+            "  /ping <peer_name>                   - Ping a peer to measure round-trip latency",
+          );
+          appendMessage(
+            "System",
+            "  /mykey                   - Display your public key",
+          );
+        }
+        return;
+      }
+
+      if (cmd === "/mykey" || cmd === "/key") {
+        if (appendMessage) {
+          appendMessage("System", "Your Public Key:");
+          appendMessage("System", existingPubKey.trim());
         }
         return;
       }
@@ -320,6 +336,65 @@ async function checkAppFiles() {
         );
         if (appendMessage)
           appendMessage("System", `Successfully added peer "${name}".`);
+        return;
+      }
+
+      if (cmd === "/ping") {
+        const peerName = parts[1];
+        if (!peerName) {
+          if (appendMessage)
+            appendMessage("System", "Usage: /ping <peer_name>");
+          return;
+        }
+
+        try {
+          const peer = await db.get(
+            "SELECT * FROM peers WHERE LOWER(name) = LOWER(?)",
+            [peerName],
+          );
+
+          if (!peer) {
+            if (appendMessage)
+              appendMessage(
+                "System",
+                `Peer "${peerName}" not found in database.`,
+              );
+            return;
+          }
+
+          const host = peer.ip || "127.0.0.1";
+          const port = peer.port || 2222;
+
+          const pingPayload = { type: "ping", Timestamp: Date.now() };
+
+          const response = await sendMessage(
+            host,
+            port,
+            existingPrivKey,
+            pingPayload,
+          );
+
+          if (response && response.type === "pong") {
+            const latency = Date.now() - pingPayload.Timestamp;
+            if (appendMessage) {
+              appendMessage("System", `Ping to ${peer.name}: ${latency}ms`);
+            }
+          } else {
+            if (appendMessage) {
+              appendMessage(
+                "System",
+                `Ping to ${peer.name}: No response received.`,
+              );
+            }
+          }
+        } catch (err) {
+          if (appendMessage) {
+            appendMessage(
+              "System",
+              `Ping to ${peerName} failed: ${err.message}`,
+            );
+          }
+        }
         return;
       }
 
@@ -517,6 +592,12 @@ async function startSSHEngine(privateKey, db, appendMessage) {
                 // Converting raw data to JSON
                 const dataObject = JSON.parse(rawData);
 
+                if (dataObject && dataObject.type === "ping") {
+                  stream.write(JSON.stringify({ type: "pong" }));
+                  stream.exit(0);
+                  return;
+                }
+
                 // Inserting to database
                 const query =
                   "INSERT INTO messages (Message_Id, Sender, Receiver, Content, Timestamp, Status) VALUES (?, ?, ?, ?, ?, ?)";
@@ -579,7 +660,7 @@ const { Client } = require("ssh2");
 
 //For Becoming the Client
 function sendMessage(host, port, privateKey, messageObject) {
-  return new Promise((resolve, reject) =>   {
+  return new Promise((resolve, reject) => {
     const conn = new Client();
 
     conn.on("ready", () => {
@@ -592,6 +673,11 @@ function sendMessage(host, port, privateKey, messageObject) {
           return reject(err);
         }
 
+        let responsedata = "";
+        stream.on("data", (chunk) => {
+          responsedata += chunk.toString();
+        });
+
         // Convert our JavaScript object into a raw JSON string
         const payload = JSON.stringify(messageObject);
 
@@ -602,7 +688,16 @@ function sendMessage(host, port, privateKey, messageObject) {
         stream.on("close", () => {
           console.log("Message stream closed by server.");
           conn.end(); // Close the connection
-          resolve();
+
+          let responseObj = null;
+          if (responsedata) {
+            try {
+              responseObj = JSON.parse(responsedata);
+            } catch (e) {
+              console.log("Error in receiving response object");
+            }
+          }
+          resolve(responseObj);
         });
       });
     });
