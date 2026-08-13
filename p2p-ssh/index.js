@@ -537,7 +537,7 @@ async function checkAppFiles() {
 
 checkAppFiles();
 
-async function startSSHEngine(privateKey, db, appendMessage) {
+async function startSSHEngine(privateKey, db, appendMessage, port = 2222) {
   const server = new ssh2.Server(
     {
       hostKeys: [privateKey], // The server's identity
@@ -551,15 +551,24 @@ async function startSSHEngine(privateKey, db, appendMessage) {
         try {
           // 2. Reconstruct incoming OpenSSH public key string
           const incomingKey = `${ctx.key.algo} ${ctx.key.data.toString("base64")}`;
+          const rawIncomingKey = getRawKeyData(incomingKey);
 
-          // 3. Ask SQLite if this key exists in our 'peers' table
-          const peer = await db.get(
-            "SELECT * FROM peers WHERE public_key = ?",
-            [incomingKey],
-          );
+          // 3. Match against peers table using raw key data
+          const peers = await db.all("SELECT * FROM peers");
+          let matchedPeer = null;
+
+          if (peers && peers.length > 0) {
+            for (const p of peers) {
+              if (p.public_key && getRawKeyData(p.public_key) === rawIncomingKey) {
+                matchedPeer = p;
+                break;
+              }
+            }
+          }
 
           // 4. Make the decision
-          if (peer) {
+          if (matchedPeer) {
+            client.authenticatedPeerName = matchedPeer.name || "Peer";
             return ctx.accept(); // Let them in!
           } else {
             return ctx.reject(); // Kick them out!
@@ -598,16 +607,21 @@ async function startSSHEngine(privateKey, db, appendMessage) {
                   return;
                 }
 
+                // Resolve sender name dynamically from authenticated SSH key
+                const senderDisplayName =
+                  client.authenticatedPeerName ||
+                  (dataObject.Sender !== "You" ? dataObject.Sender : "Peer");
+
                 // Inserting to database
                 const query =
                   "INSERT INTO messages (Message_Id, Sender, Receiver, Content, Timestamp, Status) VALUES (?, ?, ?, ?, ?, ?)";
                 const values = [
                   dataObject.Message_Id,
-                  dataObject.Sender,
-                  dataObject.Receiver,
+                  senderDisplayName,
+                  "You",
                   dataObject.Content,
                   dataObject.Timestamp,
-                  dataObject.Status,
+                  dataObject.Status || "received",
                 ];
 
                 await db.run(query, values);
@@ -615,7 +629,7 @@ async function startSSHEngine(privateKey, db, appendMessage) {
                 // Instantly update the Terminal UI upon receiving message
                 if (appendMessage) {
                   appendMessage(
-                    dataObject.Sender,
+                    senderDisplayName,
                     dataObject.Content,
                     dataObject.Timestamp,
                   );
